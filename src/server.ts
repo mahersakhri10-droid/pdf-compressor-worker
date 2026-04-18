@@ -327,6 +327,110 @@ app.post("/jobs/compress", async (req, res) => {
   }
 });
 
+app.post("/jobs/cleanup", async (req, res) => {
+  try {
+    const { workerSecret } = getConfig();
+    const incomingSecret = req.header("x-worker-secret");
+
+    if (!workerSecret) {
+      return res.status(500).json({
+        error: "Missing PDF_COMPRESSOR_WORKER_SECRET",
+      });
+    }
+
+    if (!incomingSecret || incomingSecret !== workerSecret) {
+      return res.status(401).json({ error: "Unauthorized cleanup request" });
+    }
+
+    const supabase = createSupabaseAdmin();
+    const cutoffIso = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+
+    const { data: jobs, error: jobsError } = await supabase
+      .from("compression_jobs")
+      .select(
+        "id,input_bucket,input_path,output_bucket,output_path,worker_finished_at,status"
+      )
+      .in("status", ["done", "failed"])
+      .not("worker_finished_at", "is", null)
+      .lte("worker_finished_at", cutoffIso)
+      .order("worker_finished_at", { ascending: true })
+      .limit(100);
+
+    if (jobsError) {
+      return res.status(500).json({ error: jobsError.message });
+    }
+
+    if (!jobs || jobs.length === 0) {
+      return res.json({
+        ok: true,
+        cleanedJobs: 0,
+        deletedFiles: 0,
+      });
+    }
+
+    const bucketToPaths = new Map<string, string[]>();
+
+    for (const job of jobs) {
+      if (job.input_bucket && job.input_path) {
+        if (!bucketToPaths.has(job.input_bucket)) {
+          bucketToPaths.set(job.input_bucket, []);
+        }
+        bucketToPaths.get(job.input_bucket)!.push(job.input_path);
+      }
+
+      if (job.output_bucket && job.output_path) {
+        if (!bucketToPaths.has(job.output_bucket)) {
+          bucketToPaths.set(job.output_bucket, []);
+        }
+        bucketToPaths.get(job.output_bucket)!.push(job.output_path);
+      }
+    }
+
+    let deletedFiles = 0;
+
+    for (const [bucket, paths] of bucketToPaths.entries()) {
+      const uniquePaths = [...new Set(paths)];
+
+      if (!uniquePaths.length) continue;
+
+      const { error: removeError } = await supabase.storage
+        .from(bucket)
+        .remove(uniquePaths);
+
+      if (removeError) {
+        return res.status(500).json({
+          error: `Failed to remove files from bucket ${bucket}: ${removeError.message}`,
+        });
+      }
+
+      deletedFiles += uniquePaths.length;
+    }
+
+    const ids = jobs.map((job) => job.id);
+
+    const { error: deleteJobsError } = await supabase
+      .from("compression_jobs")
+      .delete()
+      .in("id", ids);
+
+    if (deleteJobsError) {
+      return res.status(500).json({
+        error: deleteJobsError.message,
+      });
+    }
+
+    return res.json({
+      ok: true,
+      cleanedJobs: ids.length,
+      deletedFiles,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      error: error instanceof Error ? error.message : "Unexpected cleanup error",
+    });
+  }
+});
+
 const { port } = getConfig();
 
 app.listen(port, () => {
