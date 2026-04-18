@@ -54,10 +54,7 @@ function sanitizeFilename(filename: string) {
   return cleaned || "document.pdf";
 }
 
-async function updateJob(
-  jobId: string,
-  payload: Record<string, unknown>
-) {
+async function updateJob(jobId: string, payload: Record<string, unknown>) {
   const supabase = createSupabaseAdmin();
   await supabase.from("compression_jobs").update(payload).eq("id", jobId);
 }
@@ -74,12 +71,7 @@ function buildQpdfArgs(
   ];
 
   if (level === "light") {
-    return [
-      ...baseArgs,
-      "--compression-level=6",
-      inputPath,
-      outputPath,
-    ];
+    return [...baseArgs, "--compression-level=6", inputPath, outputPath];
   }
 
   if (level === "balanced") {
@@ -97,7 +89,6 @@ function buildQpdfArgs(
     "--compression-level=9",
     "--linearize",
     "--optimize-images",
-    "--jpeg-quality=60",
     inputPath,
     outputPath,
   ];
@@ -122,15 +113,32 @@ app.get("/health", (_req, res) => {
   });
 });
 
+app.get("/qpdf-check", async (_req, res) => {
+  try {
+    const qpdfBin = getConfig().qpdfBin;
+    const result = await execFileAsync(qpdfBin, ["--version"]);
+
+    res.json({
+      ok: true,
+      qpdfBin,
+      stdout: result.stdout,
+      stderr: result.stderr,
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      qpdfBin: getConfig().qpdfBin,
+      error: error instanceof Error ? error.message : "Unknown error",
+    });
+  }
+});
+
 app.post("/jobs/compress", async (req, res) => {
   let tempDir = "";
   const jobId = req.body?.jobId as string | undefined;
 
   try {
-    const {
-      workerSecret,
-      qpdfBin,
-    } = getConfig();
+    const { workerSecret, qpdfBin } = getConfig();
 
     if (!workerSecret) {
       return res.status(500).json({
