@@ -12,33 +12,37 @@ const execFileAsync = promisify(execFile);
 const app = express();
 app.use(express.json({ limit: "10mb" }));
 
-const port = Number(process.env.PORT || 8080);
-const workerSecret = process.env.PDF_COMPRESSOR_WORKER_SECRET;
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const qpdfBin = process.env.QPDF_BIN || "qpdf";
-
-if (!workerSecret) {
-  throw new Error("Missing PDF_COMPRESSOR_WORKER_SECRET");
-}
-
-if (!supabaseUrl) {
-  throw new Error("Missing NEXT_PUBLIC_SUPABASE_URL");
-}
-
-if (!serviceRoleKey) {
-  throw new Error("Missing SUPABASE_SERVICE_ROLE_KEY");
-}
-
-const supabase = createClient(supabaseUrl, serviceRoleKey, {
-  auth: {
-    persistSession: false,
-    autoRefreshToken: false,
-    detectSessionInUrl: false,
-  },
-});
-
 type CompressionLevel = "light" | "balanced" | "strong";
+
+function getConfig() {
+  return {
+    port: Number(process.env.PORT || 8080),
+    workerSecret: process.env.PDF_COMPRESSOR_WORKER_SECRET || "",
+    supabaseUrl: process.env.NEXT_PUBLIC_SUPABASE_URL || "",
+    serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY || "",
+    qpdfBin: process.env.QPDF_BIN || "qpdf",
+  };
+}
+
+function createSupabaseAdmin() {
+  const { supabaseUrl, serviceRoleKey } = getConfig();
+
+  if (!supabaseUrl) {
+    throw new Error("Missing NEXT_PUBLIC_SUPABASE_URL");
+  }
+
+  if (!serviceRoleKey) {
+    throw new Error("Missing SUPABASE_SERVICE_ROLE_KEY");
+  }
+
+  return createClient(supabaseUrl, serviceRoleKey, {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+      detectSessionInUrl: false,
+    },
+  });
+}
 
 function sanitizeFilename(filename: string) {
   const cleaned = filename
@@ -54,6 +58,7 @@ async function updateJob(
   jobId: string,
   payload: Record<string, unknown>
 ) {
+  const supabase = createSupabaseAdmin();
   await supabase.from("compression_jobs").update(payload).eq("id", jobId);
 }
 
@@ -98,8 +103,23 @@ function buildQpdfArgs(
   ];
 }
 
+app.get("/", (_req, res) => {
+  res.send("PDF Compressor Worker is running");
+});
+
 app.get("/health", (_req, res) => {
-  res.json({ ok: true });
+  const config = getConfig();
+
+  res.json({
+    ok: true,
+    env: {
+      PORT: !!process.env.PORT,
+      NEXT_PUBLIC_SUPABASE_URL: !!config.supabaseUrl,
+      SUPABASE_SERVICE_ROLE_KEY: !!config.serviceRoleKey,
+      PDF_COMPRESSOR_WORKER_SECRET: !!config.workerSecret,
+      QPDF_BIN: config.qpdfBin,
+    },
+  });
 });
 
 app.post("/jobs/compress", async (req, res) => {
@@ -107,6 +127,17 @@ app.post("/jobs/compress", async (req, res) => {
   const jobId = req.body?.jobId as string | undefined;
 
   try {
+    const {
+      workerSecret,
+      qpdfBin,
+    } = getConfig();
+
+    if (!workerSecret) {
+      return res.status(500).json({
+        error: "Missing PDF_COMPRESSOR_WORKER_SECRET",
+      });
+    }
+
     const incomingSecret = req.header("x-worker-secret");
 
     if (!incomingSecret || incomingSecret !== workerSecret) {
@@ -145,6 +176,8 @@ app.post("/jobs/compress", async (req, res) => {
     if (!["light", "balanced", "strong"].includes(compressionLevel)) {
       return res.status(400).json({ error: "Invalid compression level" });
     }
+
+    const supabase = createSupabaseAdmin();
 
     await updateJob(jobId, {
       status: "processing",
@@ -221,8 +254,6 @@ app.post("/jobs/compress", async (req, res) => {
 
     const compressedBuffer = await fs.readFile(localOutputPath);
 
-    // حماية مهمة:
-    // إذا كان الملف الناتج أكبر من الأصل، نُبقي الأصل حتى لا نسوء النتيجة على المستخدم.
     const finalBuffer =
       compressedBuffer.length > 0 &&
       compressedBuffer.length < originalBuffer.length
@@ -288,6 +319,8 @@ app.post("/jobs/compress", async (req, res) => {
   }
 });
 
+const { port } = getConfig();
+
 app.listen(port, () => {
-  console.log(`PDF worker running on http://127.0.0.1:${port}`);
+  console.log(`PDF worker running on port ${port}`);
 });
